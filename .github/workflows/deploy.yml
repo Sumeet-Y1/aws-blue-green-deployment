@@ -81,8 +81,8 @@ jobs:
             --parameters commands=["
               aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin $ECR_REGISTRY,
               docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE,
-              docker stop app || true,
-              docker rm app || true,
+              docker stop \$(docker ps -q) || true,
+              docker rm \$(docker ps -aq) || true,
               docker run -d --name app -p 8080:8080 -e ENVIRONMENT=$INACTIVE --restart always $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE
             "] \
             --region ap-south-1
