@@ -13,7 +13,7 @@ import java.util.Map;
 @RequestMapping("/api")
 public class AppController {
 
-    private static final String VERSION = "v7";
+    private static final String VERSION = "v8";
 
     @GetMapping("/hello")
     public Map<String, String> hello() {
