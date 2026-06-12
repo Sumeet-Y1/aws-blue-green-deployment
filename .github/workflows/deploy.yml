@@ -36,76 +36,101 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
 
-      - name: Build and push Green image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: aws-blue-green-deployment
+      - name: Detect active environment
+        id: detect
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:green .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:green
+          CURRENT_TG=$(aws elbv2 describe-listeners \
+            --listener-arns ${{ secrets.ALB_LISTENER_ARN }} \
+            --query "Listeners[0].DefaultActions[0].TargetGroupArn" \
+            --output text --region ap-south-1)
+          echo "Current TG: $CURRENT_TG"
 
-      - name: Deploy to Green EC2
+          if [ "$CURRENT_TG" = "${{ secrets.BLUE_TG_ARN }}" ]; then
+            echo "ACTIVE=blue" >> $GITHUB_OUTPUT
+            echo "INACTIVE=green" >> $GITHUB_OUTPUT
+            echo "DEPLOY_INSTANCE=${{ secrets.GREEN_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+            echo "TARGET_TG=${{ secrets.GREEN_TG_ARN }}" >> $GITHUB_OUTPUT
+            echo "ROLLBACK_TG=${{ secrets.BLUE_TG_ARN }}" >> $GITHUB_OUTPUT
+          else
+            echo "ACTIVE=green" >> $GITHUB_OUTPUT
+            echo "INACTIVE=blue" >> $GITHUB_OUTPUT
+            echo "DEPLOY_INSTANCE=${{ secrets.BLUE_INSTANCE_ID }}" >> $GITHUB_OUTPUT
+            echo "TARGET_TG=${{ secrets.BLUE_TG_ARN }}" >> $GITHUB_OUTPUT
+            echo "ROLLBACK_TG=${{ secrets.GREEN_TG_ARN }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: aws-blue-green-deployment
+          INACTIVE: ${{ steps.detect.outputs.INACTIVE }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE
+          echo "Pushed image as :$INACTIVE"
+
+      - name: Deploy to inactive environment
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: aws-blue-green-deployment
+          INACTIVE: ${{ steps.detect.outputs.INACTIVE }}
         run: |
           aws ssm send-command \
-            --instance-ids ${{ secrets.GREEN_INSTANCE_ID }} \
+            --instance-ids ${{ steps.detect.outputs.DEPLOY_INSTANCE }} \
             --document-name "AWS-RunShellScript" \
             --parameters commands=["
               aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin $ECR_REGISTRY,
-              docker pull $ECR_REGISTRY/$ECR_REPOSITORY:green,
+              docker pull $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE,
               docker stop app || true,
               docker rm app || true,
-              docker run -d --name app -p 8080:8080 -e ENVIRONMENT=green --restart always $ECR_REGISTRY/$ECR_REPOSITORY:green
+              docker run -d --name app -p 8080:8080 -e ENVIRONMENT=$INACTIVE --restart always $ECR_REGISTRY/$ECR_REPOSITORY:$INACTIVE
             "] \
             --region ap-south-1
 
-      - name: Wait for Green to be healthy
+      - name: Wait for instance to start
         run: |
-          echo "Waiting 90 seconds for Green to start..."
+          echo "Waiting 90 seconds..."
           sleep 90
 
-      - name: Health check Green
+      - name: Health check inactive environment
         run: |
-          GREEN_IP=$(aws ec2 describe-instances \
-            --instance-ids ${{ secrets.GREEN_INSTANCE_ID }} \
+          INSTANCE_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ steps.detect.outputs.DEPLOY_INSTANCE }} \
             --query "Reservations[0].Instances[0].PublicIpAddress" \
             --output text --region ap-south-1)
-          echo "Green IP: $GREEN_IP"
+          echo "Instance IP: $INSTANCE_IP"
           for i in {1..10}; do
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$GREEN_IP:8080/actuator/health)
-            echo "Attempt $i - Green status: $STATUS"
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$INSTANCE_IP:8080/actuator/health)
+            echo "Attempt $i - Status: $STATUS"
             if [ "$STATUS" = "200" ]; then
-              echo "Green is healthy!"
+              echo "Healthy!"
               exit 0
             fi
             sleep 15
           done
-          echo "Green is unhealthy after 10 attempts! Keeping Blue live."
+          echo "Unhealthy! Keeping current environment live."
           exit 1
 
-      - name: Flip ALB to Green
+      - name: Flip ALB to inactive environment
         run: |
           aws elbv2 modify-listener \
             --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
-            --default-actions '[{"Type":"forward","TargetGroupArn":"${{ secrets.GREEN_TG_ARN }}"}]' \
+            --default-actions '[{"Type":"forward","TargetGroupArn":"${{ steps.detect.outputs.TARGET_TG }}"}]' \
             --region ap-south-1
-          echo "Traffic flipped to Green!"
-          sleep 15
+          echo "Traffic flipped to ${{ steps.detect.outputs.INACTIVE }}!"
 
-      - name: Verify Green is live
+      - name: Verify deployment
         run: |
           sleep 15
           RESPONSE=$(curl -s http://${{ secrets.ALB_DNS }}/api/version)
           echo "Response: $RESPONSE"
-          if echo $RESPONSE | grep -q "green"; then
-            echo "Green is live!"
+          if echo $RESPONSE | grep -q "${{ steps.detect.outputs.INACTIVE }}"; then
+            echo "Deployment successful! ${{ steps.detect.outputs.INACTIVE }} is live!"
           else
-            echo "Something went wrong! Rolling back to Blue..."
+            echo "Something went wrong! Rolling back..."
             aws elbv2 modify-listener \
               --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
-              --default-actions '[{"Type":"forward","TargetGroupArn":"${{ secrets.BLUE_TG_ARN }}"}]' \
+              --default-actions '[{"Type":"forward","TargetGroupArn":"${{ steps.detect.outputs.ROLLBACK_TG }}"}]' \
               --region ap-south-1
             exit 1
           fi
