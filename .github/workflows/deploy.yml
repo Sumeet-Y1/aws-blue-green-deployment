@@ -89,22 +89,23 @@ jobs:
         run: |
           aws elbv2 modify-listener \
             --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
-            --default-actions Type=forward,TargetGroupArn=${{ secrets.GREEN_TG_ARN }} \
+            --default-actions '[{"Type":"forward","TargetGroupArn":"${{ secrets.GREEN_TG_ARN }}"}]' \
             --region ap-south-1
           echo "Traffic flipped to Green!"
+          sleep 15
 
       - name: Verify Green is live
         run: |
-          sleep 10
+          sleep 15
           RESPONSE=$(curl -s http://${{ secrets.ALB_DNS }}/api/version)
           echo "Response: $RESPONSE"
-          if echo $RESPONSE | grep -q "green"; then
+          if echo $RESPONSE | grep -q "v2"; then
             echo "Green is live!"
           else
             echo "Something went wrong! Rolling back to Blue..."
             aws elbv2 modify-listener \
               --listener-arn ${{ secrets.ALB_LISTENER_ARN }} \
-              --default-actions Type=forward,TargetGroupArn=${{ secrets.BLUE_TG_ARN }} \
+              --default-actions '[{"Type":"forward","TargetGroupArn":"${{ secrets.BLUE_TG_ARN }}"}]' \
               --region ap-south-1
             exit 1
           fi
