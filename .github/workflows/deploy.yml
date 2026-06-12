@@ -99,7 +99,7 @@ jobs:
           sleep 15
           RESPONSE=$(curl -s http://${{ secrets.ALB_DNS }}/api/version)
           echo "Response: $RESPONSE"
-          if echo $RESPONSE | grep -q "v2"; then
+          if echo $RESPONSE | grep -q "green"; then
             echo "Green is live!"
           else
             echo "Something went wrong! Rolling back to Blue..."
