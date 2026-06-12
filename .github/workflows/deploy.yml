@@ -68,14 +68,15 @@ jobs:
 
       - name: Health check Green
         run: |
+          GREEN_IP=$(aws ec2 describe-instances \
+            --instance-ids ${{ secrets.GREEN_INSTANCE_ID }} \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text --region ap-south-1)
+          echo "Green IP: $GREEN_IP"
           for i in {1..10}; do
-            HEALTH=$(aws elbv2 describe-target-health \
-              --target-group-arn ${{ secrets.GREEN_TG_ARN }} \
-              --region ap-south-1 \
-              --query "TargetHealthDescriptions[0].TargetHealth.State" \
-              --output text)
-            echo "Attempt $i - Green health: $HEALTH"
-            if [ "$HEALTH" = "healthy" ]; then
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$GREEN_IP:8080/actuator/health)
+            echo "Attempt $i - Green status: $STATUS"
+            if [ "$STATUS" = "200" ]; then
               echo "Green is healthy!"
               exit 0
             fi
